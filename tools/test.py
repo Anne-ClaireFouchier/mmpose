@@ -1,5 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import argparse
+import json
+import numpy as np
 import os
 import os.path as osp
 import warnings
@@ -73,17 +75,6 @@ def parse_args():
     return args
 
 
-def merge_configs(cfg1, cfg2):
-    # Merge cfg2 into cfg1
-    # Overwrite cfg1 if repeated, ignore if value is None.
-    cfg1 = {} if cfg1 is None else cfg1.copy()
-    cfg2 = {} if cfg2 is None else cfg2
-    for k, v in cfg2.items():
-        if v:
-            cfg1[k] = v
-    return cfg1
-
-
 def main():
     args = parse_args()
 
@@ -111,7 +102,12 @@ def main():
                                 osp.splitext(osp.basename(args.config))[0])
 
     mmcv.mkdir_or_exist(osp.abspath(cfg.work_dir))
-
+    
+    # get model name from args.config
+    model_filename = osp.basename(args.config)
+    model_name = model_filename.split('.')[0]
+    print('cfg.work_dir : {0}, model_filename : {1}, model_name : {2} '.format(cfg.work_dir, model_filename, model_name))
+    
     # init distributed env first, since logger depends on the dist info.
     if args.launcher == 'none':
         distributed = False
@@ -156,9 +152,24 @@ def main():
         model = fuse_conv_bn(model)
 
     if not distributed:
-        model = MMDataParallel(model, device_ids=[args.gpu_id])
-        outputs = single_gpu_test(model, data_loader)
+        print("single_gpu_test")
+        model = MMDataParallel(model, device_ids=[args.gpu_id])     
+        outputs, inference_time_mean_std = single_gpu_test(model, data_loader)
+        model_time_dict = {model_name : inference_time_mean_std}
+        
+        # save the inference time for each model
+        inference_times_filename = "inference_times.json"
+        if not osp.exists(inference_times_filename) :
+            mmcv.dump(model_time_dict, inference_times_filename)
+        else :
+            with open(inference_times_filename) as f:
+                data = json.load(f)
+            data.update(model_time_dict)
+            with open(inference_times_filename, 'w') as f:
+                json.dump(data, f)               
+       
     else:
+        print("multi_gpu_test")
         model = MMDistributedDataParallel(
             model.cuda(),
             device_ids=[torch.cuda.current_device()],
@@ -167,18 +178,24 @@ def main():
                                  args.gpu_collect)
 
     rank, _ = get_dist_info()
-    eval_config = cfg.get('evaluation', {})
-    eval_config = merge_configs(eval_config, dict(metric=args.eval))
-
-    if rank == 0:
+    
+    # Save outputs
+    if rank == 0:  # WHY??
         if args.out:
             print(f'\nwriting results to {args.out}')
             mmcv.dump(outputs, args.out)
+        else :
+            output_filename = "output_" + model_name + ".json"
+            mmcv.dump(outputs, output_filename)
 
+        """
+        # Evaluate
         results = dataset.evaluate(outputs, cfg.work_dir, **eval_config)
         for k, v in sorted(results.items()):
             print(f'{k}: {v}')
+        """
 
 
 if __name__ == '__main__':
+    print("########## TESTING ##########")
     main()

@@ -1,5 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import os.path as osp
+from cv2 import mean
+import numpy as np
 import pickle
 import shutil
 import tempfile
@@ -9,11 +11,15 @@ import torch
 import torch.distributed as dist
 from mmcv.runner import get_dist_info
 
+def mean_inference_time_with_std(timings, repetitions):
+    mean_syn = np.sum(timings) / repetitions
+    std_syn = np.std(timings)
+    return [mean_syn, std_syn]
 
 def single_gpu_test(model, data_loader):
     """Test model with a single gpu.
 
-    This method tests model with a single gpu and displays test progress bar.
+    This method tests model with a single gpu and records the inference time.
 
     Args:
         model (nn.Module): Model to be tested.
@@ -27,17 +33,35 @@ def single_gpu_test(model, data_loader):
     model.eval()
     results = []
     dataset = data_loader.dataset
-    prog_bar = mmcv.ProgressBar(len(dataset))
+    
+    starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+    timings=np.zeros((len(dataset),1))
+     
+    # GPU warm-up
+    count = 0
+    for warm_up_data in data_loader and count < 10:
+        _ = model(return_loss=False, **warm_up_data)
+        count = count + 1
+    
+    
     for data in data_loader:
         with torch.no_grad():
+            starter.record()
             result = model(return_loss=False, **data)
+            ender.record()
+            torch.cuda.synchronize()
+        curr_time = starter.elapsed_time(ender)   
+        timings[len(dataset)] = curr_time   
         results.append(result)
-
+        inference_time_mean_std = mean_inference_time_with_std(timings, len(dataset))
+        """
         # use the first key as main key to calculate the batch size
         batch_size = len(next(iter(data.values())))
         for _ in range(batch_size):
             prog_bar.update()
-    return results
+        """
+            
+    return results, inference_time_mean_std
 
 
 def multi_gpu_test(model, data_loader, tmpdir=None, gpu_collect=False):
